@@ -1,0 +1,229 @@
+================================================================================
+FLASH CRASH SIMULATOR — INSTRUCTIONS
+================================================================================
+
+Project location:
+    C:\Git\FlashCrash.Claude\flash-crash-sim\flash-crash-sim\
+
+Architecture:
+    C# producer -> RabbitMQ -> Python/pandas consumer -> Postgres -> Streamlit
+
+
+--------------------------------------------------------------------------------
+ONE-TIME PREREQS (already done, just here for reference)
+--------------------------------------------------------------------------------
+
+- Docker Desktop installed and running
+- Python 3.12 installed      (test: py -3.12 --version)
+- .NET 8 SDK installed        (test: dotnet --version)
+- Java 17 installed + JAVA_HOME set   (only needed if you re-add Spark)
+- Project extracted to the folder above
+- Consumer venv set up at:  consumer\.venv
+- Dashboard venv set up at: dashboard\.venv
+
+
+--------------------------------------------------------------------------------
+STARTUP (4 PowerShell tabs, in this order)
+--------------------------------------------------------------------------------
+
+First: make sure Docker Desktop is running — look for the whale icon in the
+system tray (bottom-right near the clock). If it's animating, wait until it
+settles. If it's missing, launch Docker Desktop from the Start menu.
+
+-------- TAB 1 — Infrastructure (Docker: RabbitMQ + Postgres) --------
+
+    cd C:\Git\FlashCrash.Claude\flash-crash-sim\flash-crash-sim
+    docker compose up -d
+    docker ps
+
+    Expect: fcs-rabbitmq and fcs-postgres both showing "(healthy)".
+    If they say "(health: starting)", wait 15 seconds and run docker ps again.
+
+    Leave this tab alone. Containers run in the background.
+
+-------- TAB 2 — Consumer (Python / pandas) --------
+
+    cd C:\Git\FlashCrash.Claude\flash-crash-sim\flash-crash-sim\consumer
+    .\.venv\Scripts\Activate.ps1
+    python consumer_pandas.py
+
+    Expect:
+        Connecting to RabbitMQ at localhost...
+        Connecting to Postgres...
+        Consumer ready. Draining...
+
+    Leave it alone. Do NOT type in it, do NOT Ctrl+C it. It prints
+    "batch: msgs=N candles=M" lines once the producer is running.
+
+-------- TAB 3 — Producer (C#) --------
+
+    cd C:\Git\FlashCrash.Claude\flash-crash-sim\flash-crash-sim\producer
+    dotnet run
+
+    Expect:
+        Producer starting: host=localhost, rate=50/s, duration=forever
+        sent=500 price=99.83
+        sent=1000 price=100.21
+        ...
+
+    Flip back to Tab 2 — you should now see "batch: msgs=N candles=M" lines.
+
+-------- TAB 4 — Dashboard (Streamlit) --------
+
+    cd C:\Git\FlashCrash.Claude\flash-crash-sim\flash-crash-sim\dashboard
+    .\.venv\Scripts\Activate.ps1
+    streamlit run app.py
+
+    Browser auto-opens at:  http://localhost:8501
+
+    If the browser doesn't open, manually go to the URL Streamlit prints.
+
+
+--------------------------------------------------------------------------------
+CHEAT SHEET (for when you know what you're doing)
+--------------------------------------------------------------------------------
+
+    Tab 1:  cd ...\flash-crash-sim         ; docker compose up -d
+    Tab 2:  cd ...\consumer                ; .\.venv\Scripts\Activate.ps1 ; python consumer_pandas.py
+    Tab 3:  cd ...\producer                ; dotnet run
+    Tab 4:  cd ...\dashboard               ; .\.venv\Scripts\Activate.ps1 ; streamlit run app.py
+
+
+--------------------------------------------------------------------------------
+SHUTDOWN
+--------------------------------------------------------------------------------
+
+Stop in REVERSE order (dashboard first, Docker last):
+
+    Tab 4 (dashboard):  Ctrl+C once, close tab
+    Tab 3 (producer):   Ctrl+C once, close tab
+    Tab 2 (consumer):   Ctrl+C once, close tab
+    Tab 1 (docker):     docker compose down
+
+Data persists between runs in the pgdata volume. Next startup, your ticks
+and candles tables are still there.
+
+To WIPE the database (fresh start):
+    docker compose down -v
+The -v removes the volume too.
+
+
+--------------------------------------------------------------------------------
+SANITY CHECKS
+--------------------------------------------------------------------------------
+
+Is Postgres getting data?
+
+    docker exec -it fcs-postgres psql -U fcs -d flashcrash -c "SELECT count(*) FROM ticks; SELECT count(*) FROM candles_1s;"
+
+    Expect row counts that grow each time you run it.
+
+RabbitMQ management UI:
+
+    http://localhost:15672    (username: guest, password: guest)
+
+    Navigate to Queues -> ticks.queue to see queue depth, message rate, etc.
+
+
+--------------------------------------------------------------------------------
+COMMON PROBLEMS AND FIXES
+--------------------------------------------------------------------------------
+
+"no configuration file provided: not found" when running docker compose
+    -> You're in the wrong folder. cd into the one that has docker-compose.yml.
+
+"Cannot connect to the Docker daemon"
+    -> Docker Desktop isn't running. Launch it from the Start menu and wait
+       for the whale icon to stop animating.
+
+Consumer: "ModuleNotFoundError: No module named 'pandas'" (or pika, psycopg2)
+    -> Venv isn't activated, or packages not installed. Fix:
+           .\.venv\Scripts\Activate.ps1
+           pip install pika psycopg2-binary pandas
+
+Consumer: "pika.exceptions.AMQPConnectionError"
+    -> RabbitMQ container isn't up yet. Check with:  docker ps
+       If not running, go to Tab 1 and:  docker compose up -d
+
+Consumer: "psycopg2.OperationalError: could not connect to server"
+    -> Postgres container isn't up. Same fix as above.
+
+Producer: "'dotnet' is not recognized"
+    -> .NET 8 SDK isn't installed or not on PATH. Install:
+           winget install Microsoft.DotNet.SDK.8
+       Then close PowerShell and open a new window.
+
+Dashboard: browser opens but shows "No candles yet"
+    -> Producer or consumer isn't running. Check Tabs 2 and 3.
+       Also check: docker exec -it fcs-postgres psql -U fcs -d flashcrash -c "SELECT count(*) FROM candles_1s;"
+
+PowerShell: "cannot be loaded because running scripts is disabled"
+    -> One-time fix, run in PowerShell:
+           Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+       Answer Y when prompted.
+
+Port 5432 already in use (Postgres)
+    -> You already have a local Postgres running. Either stop it, or edit
+       docker-compose.yml to map "5433:5432" and update POSTGRES_PORT in the
+       consumer and dashboard environments to 5433.
+
+Port 5672 or 15672 already in use (RabbitMQ)
+    -> Same idea: another AMQP service is running. Stop it or remap the port.
+
+Everything seems fine but no data flows
+    -> Check queue depth in RabbitMQ UI (http://localhost:15672). If messages
+       are piling up, the consumer isn't draining. If the queue is empty, the
+       producer isn't publishing.
+
+
+--------------------------------------------------------------------------------
+FILE LAYOUT
+--------------------------------------------------------------------------------
+
+    flash-crash-sim\
+        docker-compose.yml         Docker config for RabbitMQ + Postgres
+        db\
+            init.sql               Postgres schema (ticks, candles_1s)
+        producer\
+            Program.cs             C# tick generator
+            Producer.csproj
+            Dockerfile
+        consumer\
+            consumer_pandas.py     <-- what you actually run
+            consumer.py            old Spark version (currently unused)
+            requirements.txt
+            .venv\                 virtualenv
+        dashboard\
+            app.py                 Streamlit + Plotly dashboard
+            requirements.txt
+            .venv\                 virtualenv
+        tests\
+            smoke_consumer.py      offline unit test for aggregation logic
+
+
+--------------------------------------------------------------------------------
+CURRENT STATE / WHAT'S NEXT
+--------------------------------------------------------------------------------
+
+Working:
+    C# -> RabbitMQ -> pandas consumer -> Postgres -> Streamlit dashboard
+    1-second OHLC candles, live candlestick chart, refresh every 3 seconds.
+
+Not yet built (next phases if you come back to it):
+    1. Spoofing generator in the C# producer
+       - Bursts of large LIMIT orders followed by rapid CANCELs
+    2. Spoofing detection in the consumer
+       - Rolling cancel-to-fill ratio per 5s window
+       - Order-size z-score
+       - Write flagged events to a new `alerts` table
+    3. Dashboard alert overlay
+       - Red markers on the candlestick chart where alerts fired
+    4. Flash Crash replay mode
+       - Scripted price arc matching the 2010-05-06 intraday shape
+
+Resume bullet suggestion based on what's actually built:
+    "Built an event-driven market data pipeline: C# generates simulated order
+    ticks into RabbitMQ; a Python consumer aggregates 1-second OHLC candles
+    and lands them in PostgreSQL; Streamlit + Plotly renders the live book."
+
+================================================================================
